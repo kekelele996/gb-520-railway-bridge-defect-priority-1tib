@@ -20,6 +20,12 @@ export function createEntityStore(id: string) {
 			catch (error) { this.error = error instanceof Error ? error.message : String(error); return false; }
 			finally { this.loading = false; }
 		},
+		async registerRetest(path: string, item: DomainRecord, conclusion: string): Promise<boolean> {
+			this.loading = true; this.error = '';
+			try { await request<DomainRecord>(`/${path}/${item.id}/retest`, { method: 'POST', body: JSON.stringify({ expectedVersion: item.version, conclusion }) }); await this.load(path); return true; }
+			catch (error) { this.error = error instanceof Error ? error.message : String(error); return false; }
+			finally { this.loading = false; }
+		},
     },
   });
 }

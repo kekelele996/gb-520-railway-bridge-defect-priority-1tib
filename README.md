@@ -42,6 +42,9 @@ docker compose down -v --remove-orphans
 - 所有状态变化使用乐观锁并写入审计日志；审计查询仅 reviewer/admin 可见。
 - 优先级决定的每次创建、草稿更新和定稿均追加不可变版本，保留证据、状态、操作者、request ID 和完整快照。
 - 优先级只能由不同于拟制人的 reviewer/admin 定稿；observe/restrict/urgent 均为不可覆盖终态。
+- 复测到期控制：restrict/urgent 定稿按风险生成复测截止（high/critical 为 3 天，其余 7 天，observe 无需复测）；到期未登记复测结论时，缺陷与优先级记录显示“逾期待复测”且保留原决定。
+- 复测结论只能由非拟制人的 reviewer/admin 通过 `POST /api/priorities/:id/retest` 登记，登记后清除逾期并追加版本；同一缺陷逾期未复测时不得新建定稿决定。
+- 历史已定稿记录在启动时按定稿版本时间补算复测截止，已有版本链不改动。
 - 请求 ID、结构化日志、全局错误映射和 Redis 分布式限流。
 - 提供脱敏运行配置、当前会话、审计汇总和单实体审计历史接口。
 - 业务工作台支持查询、新建、状态推进、风险标识及操作审计查看。

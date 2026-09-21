@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/blueship581/railway-bridge-defect-priority/backend/internal/config"
+	"github.com/blueship581/railway-bridge-defect-priority/backend/internal/constants"
 	"github.com/blueship581/railway-bridge-defect-priority/backend/internal/model"
 	"github.com/glebarez/sqlite"
 	"github.com/redis/go-redis/v9"
@@ -64,6 +65,9 @@ func Open(ctx context.Context, cfg config.Config, log *slog.Logger) (*gorm.DB, *
 	if err := Seed(ctx, db); err != nil {
 		return nil, nil, err
 	}
+	if err := backfillRetestDeadlines(db); err != nil {
+		return nil, nil, err
+	}
 	var redisClient *redis.Client
 	if cfg.RedisAddr != "" {
 		redisClient = redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword})
@@ -83,6 +87,35 @@ func migrate(db *gorm.DB) error {
 		&model.PriorityDecision{},
 		&model.PriorityDecisionRevision{},
 	)
+}
+
+// backfillRetestDeadlines recomputes 复测截止 for historical restrict/urgent
+// decisions finalized before the retest control existed. The deadline is
+// derived from the finalizing revision timestamp; existing version chains,
+// versions and timestamps are left untouched, so the operation is idempotent.
+func backfillRetestDeadlines(db *gorm.DB) error {
+	var decisions []model.PriorityDecision
+	err := db.Where("status IN ? AND retest_deadline IS NULL",
+		[]string{string(constants.PriorityLevelRestrict), string(constants.PriorityLevelUrgent)}).
+		Find(&decisions).Error
+	if err != nil {
+		return err
+	}
+	for _, decision := range decisions {
+		finalizedAt := decision.UpdatedAt
+		var revision model.PriorityDecisionRevision
+		if err := db.Where("priority_decision_id = ?", decision.ID).
+			Order("version DESC").First(&revision).Error; err == nil {
+			finalizedAt = revision.CreatedAt
+		}
+		deadline := finalizedAt.Add(constants.RetestWindow(decision.RiskLevel))
+		if err := db.Model(&model.PriorityDecision{}).
+			Where("id = ?", decision.ID).
+			UpdateColumn("retest_deadline", deadline).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func Seed(ctx context.Context, db *gorm.DB) error {
@@ -225,23 +258,39 @@ func seedPriorityDecision(ctx context.Context, db *gorm.DB) error {
 			Description: "用于启动验证和主要流程演示的优先级决定记录"}, Facility: "铁路桥梁缺陷处置优先级区域3", Owner: "安全主管组",
 			Category: "复核", RiskLevel: "high", MetricValue: 37.5, MetricUnit: "score",
 			EffectiveAt: now.Add(6 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "DF-003", PreparedBy: "operator"},
+
+		{BaseModel: model.BaseModel{Code: "PD-004", Name: "优先级决定示例四", Status: "urgent", Version: 2,
+			Description: "十天前定稿的紧急处置决定，用于演示复测到期与逾期待复测"}, Facility: "铁路桥梁缺陷处置优先级区域3", Owner: "安全主管组",
+			Category: "复核", RiskLevel: "critical", MetricValue: 91.0, MetricUnit: "score",
+			EffectiveAt: now.Add(-10 * 24 * time.Hour), Evidence: "支座位移超限，已实施紧急处置并等待复测", RelatedCode: "DF-003", PreparedBy: "operator"},
 	}
+	// finalizedAt backdates the finalizing revision of historical decisions so
+	// the retest-deadline backfill recomputes an already expired 复测截止.
+	finalizedAt := map[string]time.Time{"PD-004": now.Add(-10 * 24 * time.Hour)}
 	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		for index := range items {
 			item := &items[index]
 			if err := tx.Create(item).Error; err != nil {
 				return err
 			}
+			draftAt := now
+			if finalized, ok := finalizedAt[item.Code]; ok {
+				draftAt = finalized.Add(-24 * time.Hour)
+			}
 			revisions := []model.PriorityDecisionRevision{{
 				PriorityDecisionID: item.ID, Version: 1, Status: "draft", Evidence: item.Evidence,
 				Reason: "seeded decision draft", Actor: "operator", RequestID: fmt.Sprintf("seed-%s-create", item.Code),
-				Snapshot: fmt.Sprintf(`{"code":%q,"status":"draft","evidence":%q}`, item.Code, item.Evidence), CreatedAt: now,
+				Snapshot: fmt.Sprintf(`{"code":%q,"status":"draft","evidence":%q}`, item.Code, item.Evidence), CreatedAt: draftAt,
 			}}
 			if item.Status != "draft" {
+				reviewedAt := now.Add(time.Minute)
+				if finalized, ok := finalizedAt[item.Code]; ok {
+					reviewedAt = finalized
+				}
 				revisions = append(revisions, model.PriorityDecisionRevision{
 					PriorityDecisionID: item.ID, Version: item.Version, Status: item.Status, Evidence: item.Evidence,
 					Reason: "seeded independent review", Actor: "reviewer", RequestID: fmt.Sprintf("seed-%s-review", item.Code),
-					Snapshot: fmt.Sprintf(`{"code":%q,"status":%q,"evidence":%q}`, item.Code, item.Status, item.Evidence), CreatedAt: now.Add(time.Minute),
+					Snapshot: fmt.Sprintf(`{"code":%q,"status":%q,"evidence":%q}`, item.Code, item.Status, item.Evidence), CreatedAt: reviewedAt,
 				})
 			}
 			if err := tx.Create(&revisions).Error; err != nil {

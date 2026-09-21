@@ -3,7 +3,9 @@ package repository
 import (
 	"context"
 	"strings"
+	"time"
 
+	"github.com/blueship581/railway-bridge-defect-priority/backend/internal/constants"
 	"github.com/blueship581/railway-bridge-defect-priority/backend/internal/dto"
 	"github.com/blueship581/railway-bridge-defect-priority/backend/internal/model"
 	"gorm.io/gorm"
@@ -17,6 +19,8 @@ type PriorityDecisionRepository interface {
 	UpdateWithRevision(context.Context, uint, uint, *model.PriorityDecision, *model.PriorityDecisionRevision) error
 	Delete(context.Context, uint) error
 	CountByStatus(context.Context) (map[string]int64, error)
+	HasOverdueUnretestedForDefect(context.Context, string, uint, time.Time) (bool, error)
+	OverdueDefectCodes(context.Context, []string, time.Time) (map[string]bool, error)
 }
 
 type priorityDecisionRepository struct {
@@ -87,4 +91,37 @@ func (r *priorityDecisionRepository) Delete(ctx context.Context, id uint) error 
 }
 func (r *priorityDecisionRepository) CountByStatus(ctx context.Context) (map[string]int64, error) {
 	return r.store.CountByStatus(ctx)
+}
+
+// overdueUnretested filters finalized restrict/urgent decisions whose retest
+// deadline passed without a registered conclusion. The original decision is
+// kept; only the derived overdue flag is affected.
+func overdueUnretested(db *gorm.DB, now time.Time) *gorm.DB {
+	return db.
+		Where("status IN ?", []string{string(constants.PriorityLevelRestrict), string(constants.PriorityLevelUrgent)}).
+		Where("retest_deadline IS NOT NULL AND retest_deadline < ?", now).
+		Where("COALESCE(retest_conclusion, '') = ''")
+}
+
+func (r *priorityDecisionRepository) HasOverdueUnretestedForDefect(ctx context.Context, relatedCode string, excludeID uint, now time.Time) (bool, error) {
+	var count int64
+	err := overdueUnretested(r.db.WithContext(ctx).Model(&model.PriorityDecision{}), now).
+		Where("related_code = ? AND id <> ?", relatedCode, excludeID).
+		Count(&count).Error
+	return count > 0, err
+}
+
+func (r *priorityDecisionRepository) OverdueDefectCodes(ctx context.Context, codes []string, now time.Time) (map[string]bool, error) {
+	overdue := make(map[string]bool, len(codes))
+	if len(codes) == 0 {
+		return overdue, nil
+	}
+	rows := make([]string, 0)
+	err := overdueUnretested(r.db.WithContext(ctx).Model(&model.PriorityDecision{}), now).
+		Where("related_code IN ?", codes).
+		Distinct().Pluck("related_code", &rows).Error
+	for _, code := range rows {
+		overdue[code] = true
+	}
+	return overdue, err
 }

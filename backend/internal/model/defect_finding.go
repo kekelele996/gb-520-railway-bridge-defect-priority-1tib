@@ -16,6 +16,9 @@ type DefectFinding struct {
 	EffectiveAt time.Time `json:"effectiveAt"`
 	Evidence    string    `json:"evidence" gorm:"size:2000"`
 	RelatedCode string    `json:"relatedCode" gorm:"size:64;index"`
+	// RetestOverdue is derived on read from linked priority decisions whose
+	// retest deadline passed without a registered conclusion. Never persisted.
+	RetestOverdue bool `json:"retestOverdue" gorm:"-"`
 }
 
 func (item *DefectFinding) GetBase() *BaseModel { return &item.BaseModel }

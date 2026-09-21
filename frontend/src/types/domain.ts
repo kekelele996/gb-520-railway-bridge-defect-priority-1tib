@@ -16,6 +16,11 @@ export interface DomainRecord {
   evidence: string;
   relatedCode: string;
   preparedBy?: string;
+  retestDeadline?: string | null;
+  retestConclusion?: string;
+  retestReviewedBy?: string;
+  retestReviewedAt?: string | null;
+  retestOverdue?: boolean;
   revisions?: PriorityDecisionRevision[];
   createdAt: string;
   updatedAt: string;

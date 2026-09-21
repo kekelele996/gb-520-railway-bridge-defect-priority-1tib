@@ -13,3 +13,8 @@ export async function transitionPriorityDecision(id: number, status: string, exp
     method: 'POST', body: JSON.stringify({ status, expectedVersion, reason }),
   });
 }
+export async function registerRetestConclusion(id: number, expectedVersion: number, conclusion: string) {
+  return request<DomainRecord>(`/priorities/${id}/retest`, {
+    method: 'POST', body: JSON.stringify({ expectedVersion, conclusion }),
+  });
+}

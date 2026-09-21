@@ -1,5 +1,7 @@
 package constants
 
+import "time"
+
 // Shared status values are mirrored in frontend/src/types/status.ts. Keeping
 // the lists explicit makes state-machine drift visible during code review.
 
@@ -52,6 +54,28 @@ var PriorityDecisionTransitions = map[string]map[string]bool{
 	"observe":  {},
 	"restrict": {},
 	"urgent":   {},
+}
+
+// Retest deadlines: 限速/紧急 finalizations require a retest conclusion before
+// the deadline. High-risk defects get a shorter window than the rest.
+const (
+	RetestWindowHighRisk = 3 * 24 * time.Hour
+	RetestWindowDefault  = 7 * 24 * time.Hour
+)
+
+// PriorityRequiresRetest reports whether a finalized status carries a retest
+// obligation. observe decisions are monitored without a retest deadline.
+func PriorityRequiresRetest(status string) bool {
+	return status == string(PriorityLevelRestrict) || status == string(PriorityLevelUrgent)
+}
+
+// RetestWindow returns the deadline window for a finalized decision based on
+// the recorded risk level: high/critical defects must be retested sooner.
+func RetestWindow(riskLevel string) time.Duration {
+	if riskLevel == "high" || riskLevel == "critical" {
+		return RetestWindowHighRisk
+	}
+	return RetestWindowDefault
 }
 
 func CanTransition(graph map[string]map[string]bool, from, to string) bool {

@@ -19,6 +19,7 @@ type PriorityDecisionService interface {
 	Create(context.Context, dto.CreatePriorityDecision, string, string) (model.PriorityDecision, error)
 	Update(context.Context, uint, dto.UpdatePriorityDecision, string, string, string) (model.PriorityDecision, error)
 	Transition(context.Context, uint, dto.TransitionRequest, string, string, string) (model.PriorityDecision, error)
+	RegisterRetest(context.Context, uint, dto.RegisterRetestConclusion, string, string, string) (model.PriorityDecision, error)
 	Delete(context.Context, uint, string, string) error
 	StatusCounts(context.Context) (map[string]int64, error)
 }
@@ -33,11 +34,24 @@ func NewPriorityDecisionService(repo repository.PriorityDecisionRepository, secu
 }
 
 func (s *priorityDecisionService) List(ctx context.Context, query dto.PageQuery) (repository.Page[model.PriorityDecision], error) {
-	return s.repository.List(ctx, query)
+	page, err := s.repository.List(ctx, query)
+	if err != nil {
+		return page, err
+	}
+	now := time.Now().UTC()
+	for index := range page.Items {
+		markRetestOverdue(&page.Items[index], now)
+	}
+	return page, nil
 }
 
 func (s *priorityDecisionService) Get(ctx context.Context, id uint) (model.PriorityDecision, error) {
-	return s.repository.Get(ctx, id)
+	item, err := s.repository.Get(ctx, id)
+	if err != nil {
+		return item, err
+	}
+	markRetestOverdue(&item, time.Now().UTC())
+	return item, nil
 }
 
 func (s *priorityDecisionService) Create(ctx context.Context, input dto.CreatePriorityDecision, actor, requestID string) (model.PriorityDecision, error) {
@@ -120,10 +134,22 @@ func (s *priorityDecisionService) Transition(ctx context.Context, id uint, input
 	if !constants.CanTransition(constants.PriorityDecisionTransitions, current.Status, target) {
 		return model.PriorityDecision{}, fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, current.Status, target)
 	}
+	now := time.Now().UTC()
+	overdue, err := s.repository.HasOverdueUnretestedForDefect(ctx, current.RelatedCode, current.ID, now)
+	if err != nil {
+		return model.PriorityDecision{}, fmt.Errorf("check defect retest overdue: %w", err)
+	}
+	if overdue {
+		return model.PriorityDecision{}, ErrDefectRetestOverdue
+	}
 	before := current.Status
 	current.Status = target
+	if constants.PriorityRequiresRetest(target) {
+		deadline := now.Add(constants.RetestWindow(current.RiskLevel))
+		current.RetestDeadline = &deadline
+	}
 	current.Version = input.ExpectedVersion + 1
-	current.UpdatedAt = time.Now().UTC()
+	current.UpdatedAt = now
 	revision, err := newPriorityRevision(current, strings.TrimSpace(input.Reason), actor, requestID)
 	if err != nil {
 		return model.PriorityDecision{}, err
@@ -134,7 +160,48 @@ func (s *priorityDecisionService) Transition(ctx context.Context, id uint, input
 	if err := s.security.Audit(ctx, actor, requestID, "transition", "PriorityDecision", id, before, target, input.Reason); err != nil {
 		return model.PriorityDecision{}, fmt.Errorf("persist transition audit: %w", err)
 	}
-	return s.repository.Get(ctx, id)
+	return s.Get(ctx, id)
+}
+
+// RegisterRetest records the 复测结论 for a finalized restrict/urgent decision.
+// Only a reviewer/admin other than the preparer may register it; a successful
+// registration clears the derived 逾期待复测 flag while the original decision
+// stays untouched. The registration itself is appended to the immutable
+// version chain like every other aggregate mutation.
+func (s *priorityDecisionService) RegisterRetest(ctx context.Context, id uint, input dto.RegisterRetestConclusion, actor, role, requestID string) (model.PriorityDecision, error) {
+	current, err := s.repository.Get(ctx, id)
+	if err != nil {
+		return model.PriorityDecision{}, err
+	}
+	if role != model.RoleReviewer && role != model.RoleAdmin {
+		return model.PriorityDecision{}, ErrReviewRole
+	}
+	if actor == current.PreparedBy {
+		return model.PriorityDecision{}, ErrSeparationOfDuty
+	}
+	if !constants.PriorityRequiresRetest(current.Status) {
+		return model.PriorityDecision{}, ErrRetestNotRequired
+	}
+	if strings.TrimSpace(current.RetestConclusion) != "" {
+		return model.PriorityDecision{}, ErrRetestAlreadyRegistered
+	}
+	now := time.Now().UTC()
+	current.RetestConclusion = strings.TrimSpace(input.Conclusion)
+	current.RetestReviewedBy = actor
+	current.RetestReviewedAt = &now
+	current.Version = input.ExpectedVersion + 1
+	current.UpdatedAt = now
+	revision, err := newPriorityRevision(current, "registered retest conclusion", actor, requestID)
+	if err != nil {
+		return model.PriorityDecision{}, err
+	}
+	if err := s.repository.UpdateWithRevision(ctx, id, input.ExpectedVersion, &current, &revision); err != nil {
+		return model.PriorityDecision{}, fmt.Errorf("register retest conclusion: %w", err)
+	}
+	if err := s.security.Audit(ctx, actor, requestID, "retest", "PriorityDecision", id, current.Status, current.Status, current.RetestConclusion); err != nil {
+		return model.PriorityDecision{}, fmt.Errorf("persist retest audit: %w", err)
+	}
+	return s.Get(ctx, id)
 }
 
 func (s *priorityDecisionService) Delete(ctx context.Context, id uint, actor, requestID string) error {
@@ -173,4 +240,11 @@ func newPriorityRevision(item model.PriorityDecision, reason, actor, requestID s
 		Reason: strings.TrimSpace(reason), Actor: actor, RequestID: requestID,
 		Snapshot: string(snapshot), CreatedAt: time.Now().UTC(),
 	}, nil
+}
+
+// markRetestOverdue derives the 逾期待复测 flag on read: the deadline passed
+// and no retest conclusion has been registered. The stored decision is kept.
+func markRetestOverdue(item *model.PriorityDecision, now time.Time) {
+	item.RetestOverdue = item.RetestDeadline != nil &&
+		strings.TrimSpace(item.RetestConclusion) == "" && now.After(*item.RetestDeadline)
 }

@@ -7,17 +7,26 @@ import "time"
 // changes naturally span persistence, service and UI layers.
 type PriorityDecision struct {
 	BaseModel
-	Facility    string                     `json:"facility" gorm:"size:120;index"`
-	Owner       string                     `json:"owner" gorm:"size:120;index"`
-	Category    string                     `json:"category" gorm:"size:80;index"`
-	RiskLevel   string                     `json:"riskLevel" gorm:"size:32;index"`
-	MetricValue float64                    `json:"metricValue"`
-	MetricUnit  string                     `json:"metricUnit" gorm:"size:24"`
-	EffectiveAt time.Time                  `json:"effectiveAt"`
-	Evidence    string                     `json:"evidence" gorm:"size:2000"`
-	RelatedCode string                     `json:"relatedCode" gorm:"size:64;index"`
-	PreparedBy  string                     `json:"preparedBy" gorm:"size:80;index;not null"`
-	Revisions   []PriorityDecisionRevision `json:"revisions" gorm:"foreignKey:PriorityDecisionID;constraint:OnDelete:CASCADE"`
+	Facility    string    `json:"facility" gorm:"size:120;index"`
+	Owner       string    `json:"owner" gorm:"size:120;index"`
+	Category    string    `json:"category" gorm:"size:80;index"`
+	RiskLevel   string    `json:"riskLevel" gorm:"size:32;index"`
+	MetricValue float64   `json:"metricValue"`
+	MetricUnit  string    `json:"metricUnit" gorm:"size:24"`
+	EffectiveAt time.Time `json:"effectiveAt"`
+	Evidence    string    `json:"evidence" gorm:"size:2000"`
+	RelatedCode string    `json:"relatedCode" gorm:"size:64;index"`
+	PreparedBy  string    `json:"preparedBy" gorm:"size:80;index;not null"`
+	// Retest fields track the 复测到期控制 lifecycle. The deadline is stamped
+	// when a restrict/urgent decision is finalized; the conclusion can only be
+	// registered by a reviewer other than the preparer and clears the overdue
+	// flag. RetestOverdue is derived on read and never persisted.
+	RetestDeadline   *time.Time                 `json:"retestDeadline" gorm:"index"`
+	RetestConclusion string                     `json:"retestConclusion" gorm:"size:1000"`
+	RetestReviewedBy string                     `json:"retestReviewedBy" gorm:"size:80"`
+	RetestReviewedAt *time.Time                 `json:"retestReviewedAt"`
+	RetestOverdue    bool                       `json:"retestOverdue" gorm:"-"`
+	Revisions        []PriorityDecisionRevision `json:"revisions" gorm:"foreignKey:PriorityDecisionID;constraint:OnDelete:CASCADE"`
 }
 
 func (item *PriorityDecision) GetBase() *BaseModel { return &item.BaseModel }
