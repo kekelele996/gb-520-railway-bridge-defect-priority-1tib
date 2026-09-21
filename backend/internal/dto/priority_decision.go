@@ -33,3 +33,10 @@ type UpdatePriorityDecision struct {
 	Evidence        string    `json:"evidence" binding:"required,max=2000"`
 	RelatedCode     string    `json:"relatedCode" binding:"required,max=64"`
 }
+
+// RegisterRetestConclusion is the write contract for 复测结论登记. Registering
+// the conclusion clears the overdue flag while the original decision stands.
+type RegisterRetestConclusion struct {
+	ExpectedVersion uint   `json:"expectedVersion" binding:"required"`
+	Conclusion      string `json:"conclusion" binding:"required,min=2,max=500"`
+}

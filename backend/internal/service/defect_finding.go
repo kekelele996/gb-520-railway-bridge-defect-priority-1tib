@@ -24,19 +24,57 @@ type DefectFindingService interface {
 
 type defectFindingService struct {
 	repository repository.DefectFindingRepository
+	priorities repository.PriorityDecisionRepository
 	security   SecurityService
 }
 
-func NewDefectFindingService(repo repository.DefectFindingRepository, security SecurityService) DefectFindingService {
-	return &defectFindingService{repository: repo, security: security}
+func NewDefectFindingService(repo repository.DefectFindingRepository, priorities repository.PriorityDecisionRepository, security SecurityService) DefectFindingService {
+	return &defectFindingService{repository: repo, priorities: priorities, security: security}
 }
 
 func (s *defectFindingService) List(ctx context.Context, query dto.PageQuery) (repository.Page[model.DefectFinding], error) {
-	return s.repository.List(ctx, query)
+	page, err := s.repository.List(ctx, query)
+	if err != nil {
+		return page, err
+	}
+	if err := s.markRetestOverdue(ctx, page.Items); err != nil {
+		return repository.Page[model.DefectFinding]{}, err
+	}
+	return page, nil
 }
 
 func (s *defectFindingService) Get(ctx context.Context, id uint) (model.DefectFinding, error) {
-	return s.repository.Get(ctx, id)
+	item, err := s.repository.Get(ctx, id)
+	if err != nil {
+		return item, err
+	}
+	items := []model.DefectFinding{item}
+	if err := s.markRetestOverdue(ctx, items); err != nil {
+		return model.DefectFinding{}, err
+	}
+	return items[0], nil
+}
+
+// markRetestOverdue flags defects whose finalized priority decision missed the
+// retest deadline, so the defect list shows 逾期待复测 alongside the priority.
+func (s *defectFindingService) markRetestOverdue(ctx context.Context, items []model.DefectFinding) error {
+	if len(items) == 0 {
+		return nil
+	}
+	codes, err := s.priorities.OverdueRetestRelatedCodes(ctx, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("check overdue retest for 缺陷发现: %w", err)
+	}
+	overdue := make(map[string]bool, len(codes))
+	for _, code := range codes {
+		overdue[code] = true
+	}
+	for index := range items {
+		if overdue[items[index].Code] {
+			items[index].RetestOverdue = true
+		}
+	}
+	return nil
 }
 
 func (s *defectFindingService) Create(ctx context.Context, input dto.CreateDefectFinding, actor, requestID string) (model.DefectFinding, error) {

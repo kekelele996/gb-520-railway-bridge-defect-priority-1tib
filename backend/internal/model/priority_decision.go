@@ -17,7 +17,14 @@ type PriorityDecision struct {
 	Evidence    string                     `json:"evidence" gorm:"size:2000"`
 	RelatedCode string                     `json:"relatedCode" gorm:"size:64;index"`
 	PreparedBy  string                     `json:"preparedBy" gorm:"size:80;index;not null"`
-	Revisions   []PriorityDecisionRevision `json:"revisions" gorm:"foreignKey:PriorityDecisionID;constraint:OnDelete:CASCADE"`
+	// RetestDueAt opens when the decision is finalized as restrict/urgent and
+	// stays recorded after the retest so the window remains auditable.
+	RetestDueAt      *time.Time                 `json:"retestDueAt"`
+	RetestConclusion string                     `json:"retestConclusion" gorm:"size:500"`
+	RetestBy         string                     `json:"retestBy" gorm:"size:80"`
+	RetestAt         *time.Time                 `json:"retestAt"`
+	RetestOverdue    bool                       `json:"retestOverdue" gorm:"-"`
+	Revisions        []PriorityDecisionRevision `json:"revisions" gorm:"foreignKey:PriorityDecisionID;constraint:OnDelete:CASCADE"`
 }
 
 func (item *PriorityDecision) GetBase() *BaseModel { return &item.BaseModel }
@@ -25,6 +32,38 @@ func (item *PriorityDecision) GetBase() *BaseModel { return &item.BaseModel }
 func (item PriorityDecision) TableName() string { return "priority_decisions" }
 
 var PriorityDecisionInitialStatus = "draft"
+
+// RetestDueDaysHighRisk and RetestDueDaysDefault bound the retest window that
+// opens when a decision is finalized as restrict or urgent.
+const (
+	RetestDueDaysHighRisk = 3
+	RetestDueDaysDefault  = 7
+)
+
+// RetestRequired reports whether a finalized priority level opens a retest window.
+func RetestRequired(status string) bool { return status == "restrict" || status == "urgent" }
+
+// RetestDueDeadline computes the retest deadline from the finalization time:
+// high-risk decisions get a shorter window than the rest.
+func RetestDueDeadline(riskLevel string, finalizedAt time.Time) time.Time {
+	days := RetestDueDaysDefault
+	if riskLevel == "high" || riskLevel == "critical" {
+		days = RetestDueDaysHighRisk
+	}
+	return finalizedAt.AddDate(0, 0, days)
+}
+
+// RetestPending reports whether a finalized decision still waits for a retest
+// conclusion to be registered.
+func (item *PriorityDecision) RetestPending() bool {
+	return item.RetestDueAt != nil && item.RetestAt == nil
+}
+
+// RefreshRetestOverdue derives the display-only overdue flag. The persisted
+// decision keeps its original status even while the retest is overdue.
+func (item *PriorityDecision) RefreshRetestOverdue(now time.Time) {
+	item.RetestOverdue = item.RetestPending() && now.After(*item.RetestDueAt)
+}
 
 // PriorityDecisionRevision is append-only. It is written in the same
 // transaction as the aggregate so an accepted version can always be traced

@@ -15,6 +15,8 @@ const { session, canAtLeast } = useAuth();
 const search = ref('');
 const showCreate = ref(false);
 const pending = ref<{ item: DomainRecord; status: string } | null>(null);
+const retestTarget = ref<DomainRecord | null>(null);
+const retestConclusion = ref('');
 const canWrite = computed(() => canAtLeast('operator'));
 const highRisk = computed(() => props.store.items.filter((item: DomainRecord) => ['high', 'critical'].includes(item.riskLevel)).length);
 
@@ -25,6 +27,11 @@ function targetsFor(item: DomainRecord): readonly string[] {
 		if (!canAtLeast('reviewer') || item.preparedBy === session.value?.username) return [];
 	} else if (!canWrite.value) return [];
 	return allowedTargets(props.config.key, item.status);
+}
+
+function canRegisterRetest(item: DomainRecord): boolean {
+	return props.config.key === 'priorityDecision' && canAtLeast('reviewer')
+		&& item.preparedBy !== session.value?.username && Boolean(item.retestDueAt) && !item.retestAt;
 }
 
 function latestRevision(item: DomainRecord): PriorityDecisionRevision | undefined {
@@ -47,6 +54,16 @@ async function confirmTransition() {
 	const changed = await props.store.transition(props.config.path, pending.value.item, pending.value.status);
 	if (changed) { search.value = ''; pending.value = null; }
 }
+
+function openRetest(item: DomainRecord) {
+	retestTarget.value = item; retestConclusion.value = '';
+}
+
+async function confirmRetest() {
+	if (!retestTarget.value || retestConclusion.value.trim().length < 2) return;
+	const registered = await props.store.registerRetest(props.config.path, retestTarget.value, retestConclusion.value.trim());
+	if (registered) { retestTarget.value = null; retestConclusion.value = ''; }
+}
 </script>
 
 <template>
@@ -67,16 +84,18 @@ async function confirmTransition() {
 			<el-table v-loading="store.loading" :data="store.items">
 				<el-table-column prop="code" label="编码" width="150"/>
 				<el-table-column label="名称" min-width="180"><template #default="{ row }"><strong>{{ row.name }}</strong><small>{{ row.facility }}</small></template></el-table-column>
-				<el-table-column label="状态" width="130"><template #default="{ row }"><StatusBadge :status="row.status"/></template></el-table-column>
+				<el-table-column label="状态" width="150"><template #default="{ row }"><StatusBadge :status="row.status"/><span v-if="row.retestOverdue" class="status status--danger">逾期待复测</span></template></el-table-column>
 				<el-table-column label="风险" width="90"><template #default="{ row }"><SeverityBadge v-if="['defectFinding', 'priorityDecision'].includes(config.key)" :severity="row.riskLevel"/><span v-else>{{ row.riskLevel }}</span></template></el-table-column>
 				<el-table-column prop="owner" label="责任人" min-width="130"/>
 				<el-table-column label="指标" width="120"><template #default="{ row }">{{ row.metricValue }} {{ row.metricUnit }}</template></el-table-column>
 				<el-table-column v-if="config.key === 'priorityDecision'" label="版本审计" width="250"><template #default="{ row }"><strong>v{{ row.version }} · {{ row.preparedBy }}</strong><small>{{ latestRevision(row)?.actor }} · {{ latestRevision(row)?.requestId }}</small><small>{{ latestRevision(row)?.evidence }}</small></template></el-table-column>
+				<el-table-column v-if="config.key === 'priorityDecision'" label="复测" width="190"><template #default="{ row }"><template v-if="row.retestAt"><strong>已登记复测</strong><small>{{ row.retestBy }} · {{ formatDate(row.retestAt) }}</small></template><template v-else-if="row.retestDueAt"><strong>{{ formatDate(row.retestDueAt) }}</strong><small>{{ row.retestOverdue ? '逾期待复测' : '待复测' }}</small></template><span v-else class="muted">无需复测</span></template></el-table-column>
 				<el-table-column label="更新时间" width="180"><template #default="{ row }">{{ formatDate(row.updatedAt) }}</template></el-table-column>
-				<el-table-column label="操作" width="300"><template #default="{ row }"><div class="row-actions"><el-button v-for="target in targetsFor(row)" :key="target" link type="primary" @click="pending = { item: row, status: target }">推进至 {{ target }}</el-button><span v-if="targetsFor(row).length === 0" class="muted">无可用操作</span></div></template></el-table-column>
+				<el-table-column label="操作" width="300"><template #default="{ row }"><div class="row-actions"><el-button v-for="target in targetsFor(row)" :key="target" link type="primary" @click="pending = { item: row, status: target }">推进至 {{ target }}</el-button><el-button v-if="canRegisterRetest(row)" link type="warning" @click="openRetest(row)">登记复测</el-button><span v-if="targetsFor(row).length === 0 && !canRegisterRetest(row)" class="muted">无可用操作</span></div></template></el-table-column>
 			</el-table>
 		</section>
 		<ConfirmDialog v-model="showCreate" :title="`新增${config.label}`" @confirm="createDemo"><p>将创建一条包含完整责任人、风险和证据信息的记录。</p></ConfirmDialog>
 		<ConfirmDialog :model-value="Boolean(pending)" title="确认状态迁移" @update:model-value="pending = null" @confirm="confirmTransition"><p>状态迁移会写入审计日志并保留请求号；优先级定稿后不可覆盖。</p><strong>{{ pending?.item.status }} → {{ pending?.status }}</strong></ConfirmDialog>
+		<ConfirmDialog :model-value="Boolean(retestTarget)" title="登记复测结论" @update:model-value="retestTarget = null" @confirm="confirmRetest"><p>复测结论只能由非拟制人的复核员登记；登记后清除逾期状态，原决定保持不变。</p><strong>{{ retestTarget?.code }} · 复测截止 {{ formatDate(retestTarget?.retestDueAt || '') }}</strong><el-input v-model="retestConclusion" type="textarea" :rows="3" maxlength="500" show-word-limit placeholder="填写复测结论（至少 2 个字符）" style="margin-top: 12px"/></ConfirmDialog>
 	</main>
 </template>

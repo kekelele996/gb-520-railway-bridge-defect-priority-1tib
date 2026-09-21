@@ -37,3 +37,12 @@
 - 浏览器控制台 error/warning：0。
 
 默认 `./scripts/validate.sh` 会在结束时执行 `docker compose down -v --remove-orphans`，不会保留本项目容器、网络或命名卷。
+
+## 复测到期控制补验（2026-09-21）
+
+- `go test ./...`、`go test -race ./...`、`go vet ./...`、`go build ./...`：通过。
+- `npm run typecheck`、`npm run build`：通过（Vite 主包体积提示与基线一致）。
+- 服务测试新增覆盖：critical/high 定稿生成 3 天复测截止、low 生成 7 天、observe 不开启窗口；operator 登记复测返回角色错误、拟制人登记返回职责分离错误；reviewer 登记后版本 +1 且追加不可变版本；重复登记返回 422。
+- 逾期链路测试：强制到期后优先级与关联缺陷均显示 `retestOverdue` 且原状态保留；同一缺陷存在逾期未复测时新建定稿被 422 阻断；登记复测后逾期清除、定稿恢复可用。
+- 数据库测试：历史已定稿（restrict/urgent）记录按定稿版本时间补算截止（高风险 3 天、其余 7 天），observe 不补算，已有版本链不变且补算幂等。
+- `scripts/validate.sh` 空卷验收补充：urgent 定稿后 `retestDueAt` 约 3 天且 `retestOverdue=false`；operator 登记复测返回 403；reviewer 登记成功生成 v4 版本与 `smoke-retest` request ID；重复登记返回 422。

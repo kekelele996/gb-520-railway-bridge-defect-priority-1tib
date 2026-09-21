@@ -61,6 +61,9 @@ func Open(ctx context.Context, cfg config.Config, log *slog.Logger) (*gorm.DB, *
 	if err := migrate(db); err != nil {
 		return nil, nil, err
 	}
+	if err := backfillPriorityRetestDue(db); err != nil {
+		return nil, nil, err
+	}
 	if err := Seed(ctx, db); err != nil {
 		return nil, nil, err
 	}
@@ -83,6 +86,32 @@ func migrate(db *gorm.DB) error {
 		&model.PriorityDecision{},
 		&model.PriorityDecisionRevision{},
 	)
+}
+
+// backfillPriorityRetestDue derives retest deadlines for decisions finalized
+// before the retest window existed. The deadline is recomputed from the
+// finalization revision timestamp; the existing revision chain stays untouched.
+func backfillPriorityRetestDue(db *gorm.DB) error {
+	var items []model.PriorityDecision
+	if err := db.Where("status IN ?", []string{"restrict", "urgent"}).
+		Where("retest_due_at IS NULL").
+		Find(&items).Error; err != nil {
+		return fmt.Errorf("list finalized decisions missing retest due: %w", err)
+	}
+	for _, item := range items {
+		finalizedAt := item.UpdatedAt
+		var revision model.PriorityDecisionRevision
+		if err := db.Where("priority_decision_id = ? AND status = ?", item.ID, item.Status).
+			Order("version ASC").First(&revision).Error; err == nil {
+			finalizedAt = revision.CreatedAt
+		}
+		due := model.RetestDueDeadline(item.RiskLevel, finalizedAt)
+		if err := db.Model(&model.PriorityDecision{}).Where("id = ?", item.ID).
+			UpdateColumn("retest_due_at", due).Error; err != nil {
+			return fmt.Errorf("backfill retest due for 优先级决定 %s: %w", item.Code, err)
+		}
+	}
+	return nil
 }
 
 func Seed(ctx context.Context, db *gorm.DB) error {
@@ -209,6 +238,9 @@ func seedPriorityDecision(ctx context.Context, db *gorm.DB) error {
 		return err
 	}
 	now := time.Now().UTC()
+	// PD-003 is seeded as already finalized, so its retest window is derived
+	// from the seeded finalization revision timestamp (now + 1 minute).
+	seedRetestDue := model.RetestDueDeadline("high", now.Add(time.Minute))
 	items := []model.PriorityDecision{
 
 		{BaseModel: model.BaseModel{Code: "PD-001", Name: "优先级决定示例一", Status: "draft", Version: 1,
@@ -224,7 +256,8 @@ func seedPriorityDecision(ctx context.Context, db *gorm.DB) error {
 		{BaseModel: model.BaseModel{Code: "PD-003", Name: "优先级决定示例三", Status: "restrict", Version: 2,
 			Description: "用于启动验证和主要流程演示的优先级决定记录"}, Facility: "铁路桥梁缺陷处置优先级区域3", Owner: "安全主管组",
 			Category: "复核", RiskLevel: "high", MetricValue: 37.5, MetricUnit: "score",
-			EffectiveAt: now.Add(6 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "DF-003", PreparedBy: "operator"},
+			EffectiveAt: now.Add(6 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "DF-003", PreparedBy: "operator",
+			RetestDueAt: &seedRetestDue},
 	}
 	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		for index := range items {

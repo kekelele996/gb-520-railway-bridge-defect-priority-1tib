@@ -81,6 +81,32 @@ curl -fsS "http://127.0.0.1:${BACKEND_PORT}/api/priorities/$priority_id" -H "Aut
 
 locked_status=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "http://127.0.0.1:${BACKEND_PORT}/api/priorities/$priority_id" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$(printf '%s' "$update_payload" | jq '.expectedVersion = 3')")
 [ "$locked_status" = "422" ]
+
+curl -fsS "http://127.0.0.1:${BACKEND_PORT}/api/priorities/$priority_id" -H "Authorization: Bearer $reviewer_token" | jq -e '
+	.data.status == "urgent" and
+	.data.retestDueAt != null and
+	.data.retestAt == null and
+	.data.retestOverdue == false and
+	((.data.retestDueAt | fromdateiso8601) - now > 2.9 * 86400) and
+	((.data.retestDueAt | fromdateiso8601) - now < 3.1 * 86400)' >/dev/null
+
+operator_retest_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${BACKEND_PORT}/api/priorities/$priority_id/retest" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d '{"expectedVersion":3,"conclusion":"操作员不得登记复测结论"}')
+[ "$operator_retest_status" = "403" ]
+
+curl -fsS -X POST "http://127.0.0.1:${BACKEND_PORT}/api/priorities/$priority_id/retest" -H "Authorization: Bearer $reviewer_token" -H 'X-Request-ID: smoke-retest' -H 'Content-Type: application/json' -d '{"expectedVersion":3,"conclusion":"复测合格，结构位移回稳"}' | jq -e '
+	.data.retestBy == "reviewer" and
+	.data.retestConclusion == "复测合格，结构位移回稳" and
+	.data.retestAt != null and
+	.data.retestOverdue == false and
+	.data.status == "urgent" and
+	.data.version == 4 and
+	(.data.revisions | length == 4) and
+	(.data.revisions[3].actor == "reviewer") and
+	(.data.revisions[3].requestId == "smoke-retest")' >/dev/null
+
+repeat_retest_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${BACKEND_PORT}/api/priorities/$priority_id/retest" -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' -d '{"expectedVersion":4,"conclusion":"重复登记应被拒绝"}')
+[ "$repeat_retest_status" = "422" ]
+
 curl -fsS "http://127.0.0.1:${BACKEND_PORT}/api/audit-summary?windowHours=24" -H "Authorization: Bearer $reviewer_token" | jq -e '.data.total >= 3 and .data.transitions >= 1' >/dev/null
 
 docker compose ps

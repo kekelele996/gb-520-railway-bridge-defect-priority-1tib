@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/blueship581/railway-bridge-defect-priority/backend/internal/dto"
 	"github.com/blueship581/railway-bridge-defect-priority/backend/internal/model"
@@ -17,6 +18,8 @@ type PriorityDecisionRepository interface {
 	UpdateWithRevision(context.Context, uint, uint, *model.PriorityDecision, *model.PriorityDecisionRevision) error
 	Delete(context.Context, uint) error
 	CountByStatus(context.Context) (map[string]int64, error)
+	OverdueRetestRelatedCodes(context.Context, time.Time) ([]string, error)
+	CountOverdueRetestForRelatedCode(context.Context, string, uint, time.Time) (int64, error)
 }
 
 type priorityDecisionRepository struct {
@@ -87,4 +90,28 @@ func (r *priorityDecisionRepository) Delete(ctx context.Context, id uint) error 
 }
 func (r *priorityDecisionRepository) CountByStatus(ctx context.Context) (map[string]int64, error) {
 	return r.store.CountByStatus(ctx)
+}
+
+// overdueRetestScope matches finalized decisions whose retest window elapsed
+// without a registered conclusion.
+func overdueRetestScope(db *gorm.DB, now time.Time) *gorm.DB {
+	return db.Model(&model.PriorityDecision{}).
+		Where("status IN ?", []string{"restrict", "urgent"}).
+		Where("retest_due_at IS NOT NULL AND retest_due_at < ?", now).
+		Where("retest_at IS NULL")
+}
+
+func (r *priorityDecisionRepository) OverdueRetestRelatedCodes(ctx context.Context, now time.Time) ([]string, error) {
+	codes := make([]string, 0)
+	err := overdueRetestScope(r.db.WithContext(ctx), now).
+		Distinct().Pluck("related_code", &codes).Error
+	return codes, err
+}
+
+func (r *priorityDecisionRepository) CountOverdueRetestForRelatedCode(ctx context.Context, relatedCode string, excludeID uint, now time.Time) (int64, error) {
+	var total int64
+	err := overdueRetestScope(r.db.WithContext(ctx), now).
+		Where("related_code = ? AND id <> ?", relatedCode, excludeID).
+		Count(&total).Error
+	return total, err
 }

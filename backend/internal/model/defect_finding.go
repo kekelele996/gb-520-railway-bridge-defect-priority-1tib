@@ -16,6 +16,9 @@ type DefectFinding struct {
 	EffectiveAt time.Time `json:"effectiveAt"`
 	Evidence    string    `json:"evidence" gorm:"size:2000"`
 	RelatedCode string    `json:"relatedCode" gorm:"size:64;index"`
+	// RetestOverdue is display-only: it mirrors an overdue retest window on a
+	// finalized priority decision that references this defect.
+	RetestOverdue bool `json:"retestOverdue" gorm:"-"`
 }
 
 func (item *DefectFinding) GetBase() *BaseModel { return &item.BaseModel }
